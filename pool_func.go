@@ -30,7 +30,7 @@ import (
 	"github.com/panjf2000/ants/v2/internal"
 )
 
-// PoolWithFunc accept the tasks from client, it limits the total of goroutines to a given number by recycling goroutines.
+// PoolWithFunc accepts the tasks from client, it limits the total of goroutines to a given number by recycling goroutines.
 type PoolWithFunc struct {
 	// capacity of the pool.
 	capacity int32
@@ -41,8 +41,8 @@ type PoolWithFunc struct {
 	// workers is a slice that store the available workers.
 	workers []*goWorkerWithFunc
 
-	// release is used to notice the pool to closed itself.
-	release int32
+	// state is used to notice the pool to closed itself.
+	state int32
 
 	// lock for synchronous operation.
 	lock sync.Locker
@@ -53,9 +53,6 @@ type PoolWithFunc struct {
 	// poolFunc is the function for processing tasks.
 	poolFunc func(interface{})
 
-	// once makes sure releasing this pool will just be done for one time.
-	once sync.Once
-
 	// workerCache speeds up the obtainment of the an usable worker in function:retrieveWorker.
 	workerCache sync.Pool
 
@@ -65,14 +62,14 @@ type PoolWithFunc struct {
 	options *Options
 }
 
-// Clear expired workers periodically.
+// periodicallyPurge clears expired workers periodically.
 func (p *PoolWithFunc) periodicallyPurge() {
 	heartbeat := time.NewTicker(p.options.ExpiryDuration)
 	defer heartbeat.Stop()
 
 	var expiredWorkers []*goWorkerWithFunc
 	for range heartbeat.C {
-		if atomic.LoadInt32(&p.release) == CLOSED {
+		if atomic.LoadInt32(&p.state) == CLOSED {
 			break
 		}
 		currentTime := time.Now()
@@ -137,13 +134,11 @@ func NewPoolWithFunc(size int, pf func(interface{}), options ...Option) (*PoolWi
 		lock:     internal.NewSpinLock(),
 		options:  opts,
 	}
-	p.workerCache = sync.Pool{
-		New: func() interface{} {
-			return &goWorkerWithFunc{
-				pool: p,
-				args: make(chan interface{}, workerChanCap),
-			}
-		},
+	p.workerCache.New = func() interface{} {
+		return &goWorkerWithFunc{
+			pool: p,
+			args: make(chan interface{}, workerChanCap),
+		}
 	}
 	if p.options.PreAlloc {
 		p.workers = make([]*goWorkerWithFunc, 0, size)
@@ -160,7 +155,7 @@ func NewPoolWithFunc(size int, pf func(interface{}), options ...Option) (*PoolWi
 
 // Invoke submits a task to pool.
 func (p *PoolWithFunc) Invoke(args interface{}) error {
-	if atomic.LoadInt32(&p.release) == CLOSED {
+	if atomic.LoadInt32(&p.state) == CLOSED {
 		return ErrPoolClosed
 	}
 	var w *goWorkerWithFunc
@@ -186,7 +181,7 @@ func (p *PoolWithFunc) Cap() int {
 	return int(atomic.LoadInt32(&p.capacity))
 }
 
-// Tune change the capacity of this pool.
+// Tune changes the capacity of this pool.
 func (p *PoolWithFunc) Tune(size int) {
 	if size < 0 || p.Cap() == size || p.options.PreAlloc {
 		return
@@ -194,19 +189,23 @@ func (p *PoolWithFunc) Tune(size int) {
 	atomic.StoreInt32(&p.capacity, int32(size))
 }
 
-// Release Closed this pool.
+// Release Closes this pool.
 func (p *PoolWithFunc) Release() {
-	p.once.Do(func() {
-		atomic.StoreInt32(&p.release, 1)
-		p.lock.Lock()
-		idleWorkers := p.workers
-		for i, w := range idleWorkers {
-			w.args <- nil
-			idleWorkers[i] = nil
-		}
-		p.workers = nil
-		p.lock.Unlock()
-	})
+	atomic.StoreInt32(&p.state, CLOSED)
+	p.lock.Lock()
+	idleWorkers := p.workers
+	for _, w := range idleWorkers {
+		w.args <- nil
+	}
+	p.workers = nil
+	p.lock.Unlock()
+}
+
+// Reboot reboots a released pool.
+func (p *PoolWithFunc) Reboot() {
+	if atomic.CompareAndSwapInt32(&p.state, CLOSED, OPENED) {
+		go p.periodicallyPurge()
+	}
 }
 
 //---------------------------------------------------------------------------
@@ -272,7 +271,7 @@ func (p *PoolWithFunc) retrieveWorker() *goWorkerWithFunc {
 
 // revertWorker puts a worker back into free pool, recycling the goroutines.
 func (p *PoolWithFunc) revertWorker(worker *goWorkerWithFunc) bool {
-	if atomic.LoadInt32(&p.release) == CLOSED || p.Running() > p.Cap() {
+	if atomic.LoadInt32(&p.state) == CLOSED || p.Running() > p.Cap() {
 		return false
 	}
 	worker.recycleTime = time.Now()

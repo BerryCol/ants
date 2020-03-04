@@ -35,9 +35,14 @@ const (
 
 	// DefaultCleanIntervalTime is the interval time to clean up goroutines.
 	DefaultCleanIntervalTime = time.Second
+)
+
+const (
+	// OPENED represents that the pool is opened.
+	OPENED = iota
 
 	// CLOSED represents that the pool is closed.
-	CLOSED = 1
+	CLOSED
 )
 
 var (
@@ -85,10 +90,10 @@ type Option func(opts *Options)
 
 // Options contains all options which will be applied when instantiating a ants pool.
 type Options struct {
-	// ExpiryDuration set the expired time of every worker.
+	// ExpiryDuration sets the expired time of every worker.
 	ExpiryDuration time.Duration
 
-	// PreAlloc indicate whether to make memory pre-allocation when initializing Pool.
+	// PreAlloc indicates whether to make memory pre-allocation when initializing Pool.
 	PreAlloc bool
 
 	// Max number of goroutine blocking on pool.Submit.
@@ -170,4 +175,9 @@ func Free() int {
 // Release Closes the default pool.
 func Release() {
 	defaultAntsPool.Release()
+}
+
+// Reboot reboots the default pool.
+func Reboot() {
+	defaultAntsPool.Reboot()
 }
